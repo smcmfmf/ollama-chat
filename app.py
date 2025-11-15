@@ -7,10 +7,10 @@ OLLAMA_CHAT_URL = "http://host.docker.internal:11434/api/chat"
 app = Flask(__name__)
 @app.get("/")
 def index():
-    return render_template("index2.html")
+    return render_template("index.html")
 @app.get("/2")
 def index2():
-    return render_template("index3.html")
+    return render_template("index2.html")
  
 @app.post("/api/chat")
 def chat_stream():

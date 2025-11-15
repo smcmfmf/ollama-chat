@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <title>Gemini</title>
+  <title>ollama_chat</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -87,6 +87,17 @@
         transform: translate(-3%, -8%) rotate(2deg) scale(1.08);
         opacity: 0.85;
       }
+    }
+
+    /* Canvas for fireflies (behind app content, above aurora gradients) */
+    #fireflies {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0; /* aurora-bg has z-index:0, app has z-index:1 */
+      pointer-events: none;
+      display: block;
     }
     
     #app {
@@ -241,7 +252,10 @@
   </style>
 </head>
 <body>
-  <div class="aurora-bg"></div>
+  <div class="aurora-bg">
+    <!-- canvas placed inside aurora-bg so fireflies appear over aurora gradients but behind UI -->
+    <canvas id="fireflies"></canvas>
+  </div>
   
   <div id="app">
     <div id="sidebar">
@@ -277,6 +291,171 @@
       </div>
     </div>
   </div>
+
+  <script>
+    /* ---- Fireflies canvas script ----
+       Features:
+         - lightweight particle system using canvas
+         - random spawn, soft glow via shadowBlur and 'lighter' composite
+         - variety of colors, sizes, and gentle drift
+         - caps particle count for performance
+         - responsive to resize
+       Tweak parameters in `cfg` below.
+    */
+    (function(){
+      const canvas = document.getElementById('fireflies');
+      const ctx = canvas.getContext('2d');
+
+      const cfg = {
+        maxParticles: 90,
+        spawnChancePerFrame: 0.06, // chance to spawn each frame (0-1)
+        colors: ['rgba(255,240,200,0.9)','rgba(200,240,255,0.9)','rgba(200,255,220,0.9)','rgba(255,210,240,0.9)'],
+        sizeRange: [0.6, 2.6], // radius in px
+        lifeRange: [2.5, 6.5], // seconds
+        driftX: 10, // horizontal drift multiplier
+        driftY: 8, // vertical drift multiplier
+        twinkleSpeed: 0.02,
+      };
+
+      let particles = [];
+      let lastTime = performance.now();
+
+      function resize(){
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        canvas.width = Math.ceil(canvas.clientWidth * dpr);
+        canvas.height = Math.ceil(canvas.clientHeight * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+      window.addEventListener('resize', resize);
+      // ensure canvas covers viewport
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      resize();
+
+      function rand(min, max){ return Math.random() * (max - min) + min; }
+
+      class Particle {
+        constructor(){
+          this.reset(true);
+        }
+        reset(initial){
+          this.x = rand(0, canvas.clientWidth);
+          this.y = rand(canvas.clientHeight * 0.2, canvas.clientHeight * 0.95);
+          const speed = rand(5, 20);
+          const angle = rand(-Math.PI/4, Math.PI/4);
+          this.vx = Math.cos(angle) * (speed/100) * cfg.driftX;
+          this.vy = -Math.abs(Math.sin(angle)) * (speed/100) * cfg.driftY * rand(0.2,1.2);
+          this.size = rand(cfg.sizeRange[0], cfg.sizeRange[1]);
+          this.baseAlpha = rand(0.35, 0.95);
+          this.alpha = initial ? 0 : this.baseAlpha;
+          this.color = cfg.colors[Math.floor(rand(0, cfg.colors.length))];
+          this.life = rand(cfg.lifeRange[0], cfg.lifeRange[1]);
+          this.age = initial ? rand(0, this.life) : 0;
+          this.twinkle = rand(0, Math.PI*2);
+          this.removed = false;
+        }
+        update(dt){
+          this.age += dt;
+          if (this.age >= this.life){
+            // respawn with some probability or mark removed
+            if (particles.length > cfg.maxParticles * 0.6 && Math.random() < 0.6) {
+              this.removed = true;
+              return;
+            }
+            this.reset(false);
+            return;
+          }
+          // gentle movement and bobbing
+          this.x += this.vx * dt * 60;
+          this.y += this.vy * dt * 60 + Math.sin(this.age * 2 + this.twinkle) * 0.15;
+
+          // fade in/out
+          const t = this.age / this.life;
+          if (t < 0.12) this.alpha = this.baseAlpha * (t/0.12);
+          else if (t > 0.88) this.alpha = this.baseAlpha * ((1 - t)/0.12);
+          else this.alpha = this.baseAlpha * (0.8 + 0.2 * Math.sin((this.age + this.twinkle) * 6 * cfg.twinkleSpeed));
+        }
+        draw(ctx){
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          // glow using shadowBlur
+          ctx.shadowBlur = Math.max(8, this.size * 12);
+          ctx.shadowColor = this.color;
+          ctx.fillStyle = this.color.replace(/,[^,]+\)$/,' , ' + this.alpha + ')');
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.size*2.2, 0, Math.PI*2);
+          ctx.fill();
+          // small center bright dot
+          ctx.shadowBlur = 0;
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.fillStyle = this.color.replace(/,[^,]+\)$/,' , ' + Math.min(1,this.alpha+0.35) + ')');
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function spawnOne(){
+        if (particles.length >= cfg.maxParticles) return;
+        particles.push(new Particle());
+      }
+
+      function step(now){
+        const dt = Math.min(0.06, (now - lastTime) / 1000);
+        lastTime = now;
+
+        // spawn probabilistically
+        if (Math.random() < cfg.spawnChancePerFrame) spawnOne();
+        // occasional bursts
+        if (Math.random() < 0.002 && particles.length < cfg.maxParticles - 6) {
+          for (let i=0;i<3;i++) spawnOne();
+        }
+
+        // clear with low alpha to get soft trails
+        ctx.clearRect(0,0,canvas.clientWidth, canvas.clientHeight);
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.update(dt);
+          if (p.removed) particles.splice(i,1);
+          else p.draw(ctx);
+        }
+
+        requestAnimationFrame(step);
+      }
+
+      // start with a few particles
+      for (let i=0;i<12;i++) spawnOne();
+      requestAnimationFrame(step);
+
+      // handle high-DPI canvas resizing properly
+      let resizeTimeout;
+      function handleResize(){
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(()=>{
+          resize();
+        }, 80);
+      }
+      window.addEventListener('resize', handleResize);
+
+      // optional: make a quick particle when user clicks/taps (visual flourish)
+      window.addEventListener('pointerdown', (e) => {
+        for (let i=0;i<4;i++){
+          if (particles.length < cfg.maxParticles) {
+            const p = new Particle();
+            p.x = e.clientX;
+            p.y = e.clientY;
+            p.vx = rand(-8,8) / 40;
+            p.vy = rand(-20,-6) / 40;
+            particles.push(p);
+          }
+        }
+      });
+
+    })();
+    /* ---- End fireflies script ---- */
+  </script>
 
   <script>
     const $ = (id) => document.getElementById(id);
